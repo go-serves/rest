@@ -8,9 +8,11 @@
 ## Features
 
 - **Graceful Shutdown**: Handles OS signals (SIGINT, SIGTERM) to shut down the server gracefully, ensuring all active requests are completed (up to a timeout).
-- **Observability**:
-    - **Prometheus Metrics**: Exposes a dedicated `/metrics` endpoint on a separate port/goroutine.
-    - **RED Method**: Includes middleware to automatically instrument requests with Rate, Errors, and Duration metrics.
+- **Observability (OpenTelemetry)**:
+    - **Metrics**: Automatically captures semantic HTTP metrics (request duration, payload sizes, active requests) via `otelhttp`, inherently supporting the RED (Rate, Errors, Duration) method.
+    - **Tracing**: Automatically instruments all incoming HTTP requests with distributed tracing spans.
+    - **Default Exporters**: Configured out-of-the-box with a Prometheus exporter (available on a dedicated `/metrics` endpoint) and an OTLP gRPC trace exporter.
+    - **Customizable**: Supports injecting your own custom `MeterProvider` or `TracerProvider` via functional options (`WithMeterProvider`, `WithTracerProvider`).
 - **Configuration**: Easy configuration via environment variables using  [`envconfig`](https://github.com/kelseyhightower/envconfig).
 - **Health Check**: Built-in `/health` endpoint.
 - **Structured Logging**: Uses `log/slog` for structured logging.
@@ -29,7 +31,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/rabellamy/server/rest"
+	"github.com/go-serves/rest"
 )
 
 func main() {
@@ -87,5 +89,3 @@ The server is configured using environment variables.
 ## Metrics
 
 The server exposes Prometheus metrics at `http://<MetricsHost>/metrics` (default: `http://0.0.0.0:2112/metrics`).
-
-Standard RED metrics (Rate, Errors, Duration) for your registered routes.

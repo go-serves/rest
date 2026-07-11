@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestCreateRoutes(t *testing.T) {
@@ -61,12 +63,31 @@ func TestCreateRoutes(t *testing.T) {
 	}
 }
 
+func TestWithMeterProvider(t *testing.T) {
+	t.Parallel()
+	mp := metric.NewMeterProvider()
+	opts := &ServerOptions{}
+	opt := WithMeterProvider(mp)
+	opt(opts)
+	assert.Equal(t, mp, opts.meterProvider)
+}
+
+func TestWithTracerProvider(t *testing.T) {
+	t.Parallel()
+	tp := trace.NewTracerProvider()
+	opts := &ServerOptions{}
+	opt := WithTracerProvider(tp)
+	opt(opts)
+	assert.Equal(t, tp, opts.tracerProvider)
+}
+
 func TestNewServer(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
 		config  Config
 		routes  Routes
+		opts    []ServerOption
 		wantErr bool
 	}{
 		"valid config": {
@@ -77,12 +98,17 @@ func TestNewServer(t *testing.T) {
 			routes:  Routes{},
 			wantErr: false,
 		},
-		"invalid namespace": {
+		"with custom providers": {
 			config: Config{
-				Namespace: "123invalid",
+				Namespace: "test_server_custom",
+				APIHost:   "localhost:8081",
 			},
-			routes:  Routes{},
-			wantErr: true,
+			routes: Routes{},
+			opts: []ServerOption{
+				WithMeterProvider(metric.NewMeterProvider()),
+				WithTracerProvider(trace.NewTracerProvider()),
+			},
+			wantErr: false,
 		},
 	}
 
@@ -91,7 +117,7 @@ func TestNewServer(t *testing.T) {
 			t.Parallel()
 
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			got, err := NewServer(context.Background(), tt.config, tt.routes, logger)
+			got, err := NewServer(context.Background(), tt.config, tt.routes, logger, tt.opts...)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -101,6 +127,58 @@ func TestNewServer(t *testing.T) {
 				assert.NotNil(t, got)
 			}
 		})
+	}
+}
+
+func TestNewServer_PrometheusError(t *testing.T) {
+	t.Parallel()
+
+	config := Config{
+		Namespace: "test_server",
+		APIHost:   "localhost:8080",
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	failingPrometheus := withPrometheusExporter(func() (metric.Reader, error) {
+		return nil, assert.AnError
+	})
+
+	got, err := NewServer(context.Background(), config, Routes{}, logger, failingPrometheus)
+
+	assert.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "failed to initialize prometheus exporter")
+}
+
+func TestNewServer_TraceError(t *testing.T) {
+	t.Parallel()
+
+	config := Config{
+		Namespace: "test_server",
+		APIHost:   "localhost:8080",
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	failingTrace := withTraceExporter(func(ctx context.Context) (trace.SpanExporter, error) {
+		return nil, assert.AnError
+	})
+
+	got, err := NewServer(context.Background(), config, Routes{}, logger, failingTrace)
+
+	assert.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "failed to initialize default trace exporter")
+}
+
+func withPrometheusExporter(f func() (metric.Reader, error)) ServerOption {
+	return func(o *ServerOptions) {
+		o.newPrometheusExporter = f
+	}
+}
+
+func withTraceExporter(f func(context.Context) (trace.SpanExporter, error)) ServerOption {
+	return func(o *ServerOptions) {
+		o.newTraceExporter = f
 	}
 }
 

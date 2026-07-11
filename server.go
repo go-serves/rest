@@ -10,6 +10,13 @@ import (
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type httpServer struct {
@@ -38,12 +45,65 @@ func CreateRoutes(routes Routes) *http.ServeMux {
 	return mux
 }
 
-func NewServer(ctx context.Context, config Config, routes Routes, logger *slog.Logger) (*httpServer, error) {
-	mainMux := CreateRoutes(routes)
-	handler, err := NewREDMiddleware(config.Namespace, mainMux)
-	if err != nil {
-		return nil, err
+type ServerOptions struct {
+	meterProvider  otelmetric.MeterProvider
+	tracerProvider oteltrace.TracerProvider
+
+	newPrometheusExporter func() (metric.Reader, error)
+	newTraceExporter      func(context.Context) (trace.SpanExporter, error)
+}
+
+type ServerOption func(*ServerOptions)
+
+func WithMeterProvider(mp otelmetric.MeterProvider) ServerOption {
+	return func(o *ServerOptions) {
+		o.meterProvider = mp
 	}
+}
+
+func WithTracerProvider(tp oteltrace.TracerProvider) ServerOption {
+	return func(o *ServerOptions) {
+		o.tracerProvider = tp
+	}
+}
+
+func NewServer(ctx context.Context, config Config, routes Routes, logger *slog.Logger, opts ...ServerOption) (*httpServer, error) {
+	options := ServerOptions{
+		newPrometheusExporter: func() (metric.Reader, error) { return prometheus.New() },
+		newTraceExporter:      func(ctx context.Context) (trace.SpanExporter, error) { return otlptracegrpc.New(ctx) },
+	}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	if options.meterProvider == nil {
+		exporter, err := options.newPrometheusExporter()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize prometheus exporter: %w", err)
+		}
+
+		options.meterProvider = metric.NewMeterProvider(metric.WithReader(exporter))
+	}
+
+	if options.tracerProvider == nil {
+		traceExporter, err := options.newTraceExporter(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize default trace exporter: %w", err)
+		}
+
+		options.tracerProvider = trace.NewTracerProvider(
+			trace.WithBatcher(traceExporter),
+		)
+	}
+
+	mainMux := CreateRoutes(routes)
+
+	handler := otelhttp.NewHandler(
+		mainMux,
+		config.Namespace,
+		otelhttp.WithMeterProvider(options.meterProvider),
+		otelhttp.WithTracerProvider(options.tracerProvider),
+	)
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
