@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -27,14 +28,8 @@ type httpServer struct {
 	config        Config
 }
 
-type Routes map[string]func(w http.ResponseWriter, r *http.Request)
-
-func CreateRoutes(routes Routes) *http.ServeMux {
+func CreateRoutes(gatewayMux *runtime.ServeMux) *http.ServeMux {
 	mux := http.NewServeMux()
-
-	for path, route := range routes {
-		mux.HandleFunc(path, route)
-	}
 
 	health := func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Status: %v", http.StatusOK)
@@ -42,7 +37,15 @@ func CreateRoutes(routes Routes) *http.ServeMux {
 
 	mux.HandleFunc("/health", health)
 
+	if gatewayMux != nil {
+		mux.Handle("/", gatewayMux)
+	}
+
 	return mux
+}
+
+type Service interface {
+	RegisterGateway(ctx context.Context, mux *runtime.ServeMux) error
 }
 
 type ServerOptions struct {
@@ -67,7 +70,7 @@ func WithTracerProvider(tp oteltrace.TracerProvider) ServerOption {
 	}
 }
 
-func NewServer(ctx context.Context, config Config, routes Routes, logger *slog.Logger, opts ...ServerOption) (*httpServer, error) {
+func NewServer(ctx context.Context, config Config, service Service, logger *slog.Logger, opts ...ServerOption) (*httpServer, error) {
 	options := ServerOptions{
 		newPrometheusExporter: func() (metric.Reader, error) { return prometheus.New() },
 		newTraceExporter:      func(ctx context.Context) (trace.SpanExporter, error) { return otlptracegrpc.New(ctx) },
@@ -86,17 +89,32 @@ func NewServer(ctx context.Context, config Config, routes Routes, logger *slog.L
 	}
 
 	if options.tracerProvider == nil {
-		traceExporter, err := options.newTraceExporter(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize default trace exporter: %w", err)
-		}
+		if config.TraceExporterEndpoint != "" {
+			traceExporter, err := options.newTraceExporter(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize default trace exporter: %w", err)
+			}
 
-		options.tracerProvider = trace.NewTracerProvider(
-			trace.WithBatcher(traceExporter),
-		)
+			options.tracerProvider = trace.NewTracerProvider(
+				trace.WithBatcher(traceExporter),
+			)
+		} else {
+			options.tracerProvider = trace.NewTracerProvider()
+		}
 	}
 
-	mainMux := CreateRoutes(routes)
+	var gatewayMux *runtime.ServeMux
+
+	if service != nil {
+		gatewayMux = runtime.NewServeMux()
+
+		err := service.RegisterGateway(ctx, gatewayMux)
+		if err != nil {
+			return nil, fmt.Errorf("failed to register proto gateway: %w", err)
+		}
+	}
+
+	mainMux := CreateRoutes(gatewayMux)
 
 	handler := otelhttp.NewHandler(
 		mainMux,
@@ -188,5 +206,6 @@ func (s *httpServer) shutdownServers(ctx context.Context, signal os.Signal) erro
 			return fmt.Errorf("%s server could not stopped gracefully: %w", srv.name, err)
 		}
 	}
+
 	return nil
 }

@@ -3,88 +3,43 @@
 <img src="assets/images/resting-gopher.png" width="200" height="300" alt="Resting Gopher">
 </p><br>
 
-`rest` is a Go package that provides a production-ready HTTP server with built-in observability, configuration management, and graceful shutdown capabilities.
+`rest` is a Go package that provides a production-ready HTTP server with built-in observability, configuration management, and graceful shutdown capabilities. It enforces a **Schema-First Design**, leveraging Protobuf and gRPC-Gateway to guarantee that your API documentation always exactly matches your implementation.
 
 ## Features
 
+- **Schema-First Architecture**: Strictly enforces 1:1 service boundaries. All API routes must be defined via Protobuf schemas, eliminating drift between API contracts and server implementations.
 - **Graceful Shutdown**: Handles OS signals (SIGINT, SIGTERM) to shut down the server gracefully, ensuring all active requests are completed (up to a timeout).
 - **Observability (OpenTelemetry)**:
     - **Metrics**: Automatically captures semantic HTTP metrics (request duration, payload sizes, active requests) via `otelhttp`, inherently supporting the RED (Rate, Errors, Duration) method.
-    - **Tracing**: Automatically instruments all incoming HTTP requests with distributed tracing spans.
-    - **Default Exporters**: Configured out-of-the-box with a Prometheus exporter (available on a dedicated `/metrics` endpoint) and an OTLP gRPC trace exporter.
-    - **Customizable**: Supports injecting your own custom `MeterProvider` or `TracerProvider` via functional options (`WithMeterProvider`, `WithTracerProvider`).
-- **Configuration**: Easy configuration via environment variables using  [`envconfig`](https://github.com/kelseyhightower/envconfig).
+    - **Tracing**: Configurable distributed tracing for all incoming HTTP requests via OTLP.
+    - **Customizable Providers**: Supports injecting your own custom `MeterProvider` or `TracerProvider` via functional options (`WithMeterProvider`, `WithTracerProvider`).
+- **Configuration**: Easy configuration via environment variables using [`envconfig`](https://github.com/kelseyhightower/envconfig).
 - **Health Check**: Built-in `/health` endpoint.
 - **Structured Logging**: Uses `log/slog` for structured logging.
 
 ## Usage
 
-Here's a basic example of how to use `rest`:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log/slog"
-	"net/http"
-	"os"
-
-	"github.com/go-serves/rest"
-)
-
-func main() {
-	// 1. Create Logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-	// 2. Load Configuration (prefix 'test' means env vars like TEST_APIHOST)
-	config, err := rest.LoadConfig("test")
-	if err != nil {
-		logger.Error("config loading failed", "err", err)
-		os.Exit(1)
-	}
-
-	// 3. Define Routes
-	routes := rest.Routes{
-		"/hello": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "Hello, World!")
-		},
-	}
-
-	// 4. Create Server
-	server, err := rest.NewServer(context.Background(), config, routes, logger)
-	if err != nil {
-		logger.Error("server instantiation failed", "err", err)
-		os.Exit(1)
-	}
-
-	// 5. Run Server
-	if err := server.Run(); err != nil {
-		logger.Error("server startup failed", "err", err)
-		os.Exit(1)
-	}
-}
-```
+See [example](example/main.go)
 
 ## Configuration
 
-The server is configured using environment variables.
+The server is configured using environment variables. If you pass a prefix like `APP` to `LoadConfig`, prefix all environment variables below with `APP_` (e.g. `APP_APIHOST`).
 
 | Field | Environment Variable | Default | Description |
 |-------|--------------------------------------|---------|-------------|
-| `ReadTimeout` | `APP_READTIMEOUT` | `5s` | Maximum duration for reading the entire request. |
-| `WriteTimeout` | `APP_WRITETIMEOUT` | `10s` | Maximum duration before timing out writes of the response. |
-| `IdleTimeout` | `APP_IDLETIMEOUT` | `120s` | Maximum amount of time to wait for the next request when keep-alives are enabled. |
-| `ShutdownTimeout` | `APP_SHUTDOWNTIMEOUT` | `20s` | Maximum duration to wait for graceful shutdown. |
-| `APIHost` | `APP_APIHOST` | `0.0.0.0:3000` | Host and port for the main API server. |
-| `DebugHost` | `APP_DEBUGHOST` | `0.0.0.0:3010` | Host and port for debug endpoints (if used). |
-| `MetricsHost` | `APP_METRICSHOST` | `0.0.0.0:2112` | Host and port for the Prometheus metrics server. |
-| `CorsAllowedOrigins` | `APP_CORSALLOWEDORIGINS` | `*` | List of allowed CORS origins. |
-| `MaxHeaderBytes` | `APP_MAXHEADERBYTES` | `0` | Maximum number of bytes the server will read parsing the request header's keys and values. |
-| `Build` | `APP_BUILD` | `dev` | Build version/tag. |
-| `Desc` | `APP_DESC` | `example server` | Server description. |
-| `Namespace` | `APP_NAMESPACE` | `APP` | Namespace for metrics. |
+| `ReadTimeout` | `READTIMEOUT` | `5s` | Maximum duration for reading the entire request. |
+| `WriteTimeout` | `WRITETIMEOUT` | `10s` | Maximum duration before timing out writes of the response. |
+| `IdleTimeout` | `IDLETIMEOUT` | `120s` | Maximum amount of time to wait for the next request when keep-alives are enabled. |
+| `ShutdownTimeout` | `SHUTDOWNTIMEOUT` | `20s` | Maximum duration to wait for graceful shutdown. |
+| `APIHost` | `APIHOST` | `0.0.0.0:3000` | Host and port for the main API server. |
+| `DebugHost` | `DEBUGHOST` | `0.0.0.0:3010` | Host and port for debug endpoints (if used). |
+| `MetricsHost` | `METRICSHOST` | `0.0.0.0:2112` | Host and port for the Prometheus metrics server. |
+| `CorsAllowedOrigins` | `CORSALLOWEDORIGINS` | `*` | List of allowed CORS origins. |
+| `MaxHeaderBytes` | `MAXHEADERBYTES` | `0` | Maximum number of bytes the server will read parsing the request header's keys and values. |
+| `Build` | `BUILD` | `dev` | Build version/tag. |
+| `Desc` | `DESC` | `example server` | Server description. |
+| `Namespace` | `NAMESPACE` | `APP` | Namespace for metrics. |
+| `TraceExporterEndpoint`| `TRACEEXPORTERENDPOINT` | `""` | The OTLP gRPC endpoint for trace exports (e.g. `localhost:4317`). Tracing is disabled if empty. |
 
 ## Metrics
 

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "github.com/go-serves/rest/example/gen/go/api/v1;apiv1";
+
+import "google/api/annotations.proto";
+
+// UserService manages users within the system.
+service UserService {
+  // GetUser retrieves a user by their ID.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse) {
+    option (google.api.http) = {
+      get: "/v1/users/{id}"
+    };
+  }
+}
+
+// GetUserRequest is the request payload for GetUser.
+message GetUserRequest {
+  // The unique identifier of the user.
+  string id = 1;
+}
+
+// GetUserResponse is the response payload for GetUser.
+message GetUserResponse {
+  // The user's ID.
+  string id = 1;
+  // The user's full name.
+  string name = 2;
+}

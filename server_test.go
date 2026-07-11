@@ -11,74 +11,97 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/stretchr/testify/assert"
+	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func TestCreateRoutes(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		routes Routes
-		path   string
-		want   int
+		setupGateway func() *runtime.ServeMux
+		method       string
+		path         string
+		wantCode     int
 	}{
-		"health check exists by default": {
-			routes: Routes{},
-			path:   "/health",
-			want:   http.StatusOK,
+		"health check exists": {
+			setupGateway: func() *runtime.ServeMux { return nil },
+			method:       http.MethodGet,
+			path:         "/health",
+			wantCode:     http.StatusOK,
 		},
-		"custom route works": {
-			routes: Routes{
-				"/foo": func(w http.ResponseWriter, r *http.Request) {
+		"gateway mux mounted": {
+			setupGateway: func() *runtime.ServeMux {
+				gatewayMux := runtime.NewServeMux()
+				_ = gatewayMux.HandlePath("GET", "/test", func(w http.ResponseWriter, r *http.Request, pathParams map[string]string) {
 					w.WriteHeader(http.StatusTeapot)
-				},
+				})
+				return gatewayMux
 			},
-			path: "/foo",
-			want: http.StatusTeapot,
-		},
-		"custom route does not overwrite health check (unless explicitly set)": {
-			routes: Routes{
-				"/bar": func(w http.ResponseWriter, r *http.Request) {},
-			},
-			path: "/health",
-			want: http.StatusOK,
+			method:   http.MethodGet,
+			path:     "/test",
+			wantCode: http.StatusTeapot,
 		},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-
-			mux := CreateRoutes(tt.routes)
-
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			mux := CreateRoutes(tt.setupGateway())
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 			rec := httptest.NewRecorder()
-
 			mux.ServeHTTP(rec, req)
-
-			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.wantCode, rec.Code)
 		})
 	}
 }
 
 func TestWithMeterProvider(t *testing.T) {
 	t.Parallel()
-	mp := metric.NewMeterProvider()
-	opts := &ServerOptions{}
-	opt := WithMeterProvider(mp)
-	opt(opts)
-	assert.Equal(t, mp, opts.meterProvider)
+
+	tests := map[string]struct {
+		provider otelmetric.MeterProvider
+	}{
+		"sets meter provider": {
+			provider: metric.NewMeterProvider(),
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			opts := &ServerOptions{}
+			opt := WithMeterProvider(tt.provider)
+			opt(opts)
+			assert.Equal(t, tt.provider, opts.meterProvider)
+		})
+	}
 }
 
 func TestWithTracerProvider(t *testing.T) {
 	t.Parallel()
-	tp := trace.NewTracerProvider()
-	opts := &ServerOptions{}
-	opt := WithTracerProvider(tp)
-	opt(opts)
-	assert.Equal(t, tp, opts.tracerProvider)
+
+	tests := map[string]struct {
+		provider oteltrace.TracerProvider
+	}{
+		"sets tracer provider": {
+			provider: trace.NewTracerProvider(),
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			opts := &ServerOptions{}
+			opt := WithTracerProvider(tt.provider)
+			opt(opts)
+			assert.Equal(t, tt.provider, opts.tracerProvider)
+		})
+	}
 }
 
 func TestNewServer(t *testing.T) {
@@ -86,7 +109,7 @@ func TestNewServer(t *testing.T) {
 
 	tests := map[string]struct {
 		config  Config
-		routes  Routes
+		service Service
 		opts    []ServerOption
 		wantErr bool
 	}{
@@ -95,7 +118,7 @@ func TestNewServer(t *testing.T) {
 				Namespace: "test_server",
 				APIHost:   "localhost:8080",
 			},
-			routes:  Routes{},
+			service: nil,
 			wantErr: false,
 		},
 		"with custom providers": {
@@ -103,11 +126,34 @@ func TestNewServer(t *testing.T) {
 				Namespace: "test_server_custom",
 				APIHost:   "localhost:8081",
 			},
-			routes: Routes{},
+			service: nil,
 			opts: []ServerOption{
 				WithMeterProvider(metric.NewMeterProvider()),
 				WithTracerProvider(trace.NewTracerProvider()),
 			},
+			wantErr: false,
+		},
+		"with trace exporter endpoint": {
+			config: Config{
+				Namespace:             "test_server_trace_mock",
+				APIHost:               "localhost:8082",
+				TraceExporterEndpoint: "dummy:4317",
+			},
+			opts: []ServerOption{
+				withTraceExporter(func(ctx context.Context) (trace.SpanExporter, error) {
+					return &mockSpanExporter{}, nil
+				}),
+			},
+			service: nil,
+			wantErr: false,
+		},
+		"with real trace exporter endpoint": {
+			config: Config{
+				Namespace:             "test_server_trace_real",
+				APIHost:               "localhost:8083",
+				TraceExporterEndpoint: "dummy:4317",
+			},
+			service: nil,
 			wantErr: false,
 		},
 	}
@@ -117,7 +163,7 @@ func TestNewServer(t *testing.T) {
 			t.Parallel()
 
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			got, err := NewServer(context.Background(), tt.config, tt.routes, logger, tt.opts...)
+			got, err := NewServer(context.Background(), tt.config, tt.service, logger, tt.opts...)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -133,41 +179,70 @@ func TestNewServer(t *testing.T) {
 func TestNewServer_PrometheusError(t *testing.T) {
 	t.Parallel()
 
-	config := Config{
-		Namespace: "test_server",
-		APIHost:   "localhost:8080",
+	tests := map[string]struct {
+		config    Config
+		setupFail func() ServerOption
+		wantErr   string
+	}{
+		"prometheus exporter error": {
+			config: Config{
+				Namespace: "test_server",
+				APIHost:   "localhost:8080",
+			},
+			setupFail: func() ServerOption {
+				return withPrometheusExporter(func() (metric.Reader, error) {
+					return nil, assert.AnError
+				})
+			},
+			wantErr: "failed to initialize prometheus exporter",
+		},
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	failingPrometheus := withPrometheusExporter(func() (metric.Reader, error) {
-		return nil, assert.AnError
-	})
-
-	got, err := NewServer(context.Background(), config, Routes{}, logger, failingPrometheus)
-
-	assert.Error(t, err)
-	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "failed to initialize prometheus exporter")
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			got, err := NewServer(context.Background(), tt.config, nil, logger, tt.setupFail())
+			assert.Error(t, err)
+			assert.Nil(t, got)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestNewServer_TraceError(t *testing.T) {
 	t.Parallel()
 
-	config := Config{
-		Namespace: "test_server",
-		APIHost:   "localhost:8080",
+	tests := map[string]struct {
+		config    Config
+		setupFail func() ServerOption
+		wantErr   string
+	}{
+		"trace exporter error": {
+			config: Config{
+				Namespace:             "test_server",
+				APIHost:               "localhost:8080",
+				TraceExporterEndpoint: "dummy:4317",
+			},
+			setupFail: func() ServerOption {
+				return withTraceExporter(func(ctx context.Context) (trace.SpanExporter, error) {
+					return nil, assert.AnError
+				})
+			},
+			wantErr: "failed to initialize default trace exporter",
+		},
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	failingTrace := withTraceExporter(func(ctx context.Context) (trace.SpanExporter, error) {
-		return nil, assert.AnError
-	})
-
-	got, err := NewServer(context.Background(), config, Routes{}, logger, failingTrace)
-
-	assert.Error(t, err)
-	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "failed to initialize default trace exporter")
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			got, err := NewServer(context.Background(), tt.config, nil, logger, tt.setupFail())
+			assert.Error(t, err)
+			assert.Nil(t, got)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func withPrometheusExporter(f func() (metric.Reader, error)) ServerOption {
@@ -249,7 +324,7 @@ func TestRun(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			routes := Routes{}
+			var service Service
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -259,7 +334,7 @@ func TestRun(t *testing.T) {
 				cancel()
 			}
 
-			server, err := NewServer(ctx, tt.config, routes, logger)
+			server, err := NewServer(ctx, tt.config, service, logger)
 			assert.NoError(t, err)
 
 			shutdownChan := make(chan os.Signal, 1)
@@ -312,7 +387,7 @@ func TestRunExported(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 			ctx, cancel := context.WithCancel(context.Background())
 
-			server, err := NewServer(ctx, tt.config, Routes{}, logger)
+			server, err := NewServer(ctx, tt.config, nil, logger)
 			assert.NoError(t, err)
 
 			errChan := make(chan error, 1)
@@ -411,6 +486,91 @@ func TestShutdownServers(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+type mockSpanExporter struct{}
+
+func (e *mockSpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySpan) error {
+	return nil
+}
+
+func (e *mockSpanExporter) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+type mockService struct {
+	registerGateway func(context.Context, *runtime.ServeMux) error
+}
+
+func (m *mockService) RegisterGateway(ctx context.Context, mux *runtime.ServeMux) error {
+	if m.registerGateway != nil {
+		return m.registerGateway(ctx, mux)
+	}
+	return nil
+}
+
+func TestWithService(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := Config{
+		APIHost:         ":0",
+		MetricsHost:     ":0",
+		ShutdownTimeout: 100 * time.Millisecond,
+	}
+
+	tests := map[string]struct {
+		setupMock        func(*mockService, *bool)
+		wantErr          bool
+		wantGwRegistered bool
+	}{
+		"valid proto route": {
+			setupMock: func(m *mockService, gwReg *bool) {
+				m.registerGateway = func(ctx context.Context, mux *runtime.ServeMux) error {
+					*gwReg = true
+					return nil
+				}
+			},
+			wantErr:          false,
+			wantGwRegistered: true,
+		},
+		"gateway error": {
+			setupMock: func(m *mockService, gwReg *bool) {
+				m.registerGateway = func(ctx context.Context, mux *runtime.ServeMux) error {
+					*gwReg = true
+					return assert.AnError
+				}
+			},
+			wantErr: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			var gatewayRegistered bool
+
+			mockSvc := &mockService{}
+			tt.setupMock(mockSvc, &gatewayRegistered)
+
+			server, err := NewServer(
+				context.Background(),
+				cfg,
+				mockSvc,
+				logger,
+				WithMeterProvider(metric.NewMeterProvider()),
+				WithTracerProvider(trace.NewTracerProvider()),
+			)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, server)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, server)
+				assert.Equal(t, tt.wantGwRegistered, gatewayRegistered)
 			}
 		})
 	}

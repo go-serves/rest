@@ -1,0 +1,7 @@
+version: v1
+name: buf.build/go-serves/rest
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - DEFAULT
